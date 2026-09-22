@@ -71,25 +71,21 @@ Archivos identificados y renombrados, pendientes de validacion/respaldo.
 C:\Scans\3_LOCAL_BACKUP
 Copia exacta del archivo recibido antes de dividirlo o moverlo.
 
-C:\Scans\4_OCR_LOCAL
-Archivos listos para OCR local.
+C:\Scans\4_COPY_AZURE_FILES_STORAGE
+Archivos pendientes de copia y verificacion en Azure Files.
 
-C:\Scans\5_OCR_EXTERNO
+C:\Scans\5_OCR_LOCAL
+Archivos cuya copia en Azure Files fue verificada y estan listos para OCR local.
+
+C:\Scans\6_OCR_EXTERNO
 Entrada de PDFs clasificados como boletas validas para el OCR externo.
 
-C:\Scans\6_COPY_AZURE_FILES_STORAGE
-Entrada local para copiar PDFs al recurso compartido Azure Files.
-
 C:\Scans\7_COMPRESS
-Destino temporal de boletas copiadas y verificadas en Azure Files.
+Destino temporal de documentos listos para compresion.
 
 C:\Scans\8_COPY_AZURE_BLOB_STORAGE
 Destino local de PDFs comprimidos correctamente. Esta etapa todavía no
 representa una conexión real con Azure Blob Storage.
-
-C:\Scans\6_COPY_AZURE_FILES_STORAGE
-Destino local de documentos que no cumplen la validacion.
-No existe integracion real con Azure en esta etapa.
 
 C:\Scans\Logs
 Outbox local JSON para eventos que no pudieron insertarse en MySQL.
@@ -112,9 +108,9 @@ La configuracion principal debe contener estas secciones:
 "PipelineSettings": {
   "ValidateDirectory": "C:\\Scans\\2_VALIDATE",
   "LocalBackupDirectory": "C:\\Scans\\3_LOCAL_BACKUP",
-  "OcrLocalDirectory": "C:\\Scans\\4_OCR_LOCAL",
-  "OcrExternalDirectory": "C:\\Scans\\5_OCR_EXTERNO",
-  "AzureFilesDirectory": "C:\\Scans\\6_COPY_AZURE_FILES_STORAGE",
+  "AzureFilesDirectory": "C:\\Scans\\4_COPY_AZURE_FILES_STORAGE",
+  "OcrLocalDirectory": "C:\\Scans\\5_OCR_LOCAL",
+  "OcrExternalDirectory": "C:\\Scans\\6_OCR_EXTERNO",
   "LogsDirectory": "C:\\Scans\\Logs",
   "ScanIntervalSeconds": 10,
   "FileStabilityChecks": 2,
@@ -199,9 +195,9 @@ Cada archivo en 2_VALIDATE se procesa automaticamente.
 
 1. Esperar estabilidad y desbloqueo.
 2. Crear una copia exacta en 3_LOCAL_BACKUP.
-3. Si es imagen, moverla a 4_OCR_LOCAL.
+3. Si es imagen, moverla a 4_COPY_AZURE_FILES_STORAGE.
 4. Si es PDF, contar paginas.
-5. Si tiene una pagina, moverlo sin modificaciones a 4_OCR_LOCAL.
+5. Si tiene una pagina, moverlo sin modificaciones a 4_COPY_AZURE_FILES_STORAGE.
 6. Si tiene varias paginas, crear un PDF por pagina:
 
 Archivo original:
@@ -220,10 +216,18 @@ Usar PDFsharp para dividir conservando cada pagina como PDF.
 Usar PDFtoImage solamente para renderizar paginas destinadas al OCR.
 
 ======================================================================
-8. ETAPA 3: OCR EN 4_OCR_LOCAL
+8. ETAPA 3: COPIA Y VERIFICACION EN 4_COPY_AZURE_FILES_STORAGE
+
+Todos los archivos provenientes de 2_VALIDATE pasan por Azure Files antes
+del OCR local. La copia verifica tamano y MD5. Si falla, el archivo permanece
+en 4_COPY_AZURE_FILES_STORAGE y se reintenta en el siguiente ciclo. Si es
+exitosa, la copia local se mueve a 5_OCR_LOCAL.
+
+======================================================================
+9. ETAPA 4: OCR EN 5_OCR_LOCAL
 ======================================================================
 
-Cada archivo que llegue a 4_OCR_LOCAL se procesa con PaddleOCR.
+Cada archivo que llegue a 5_OCR_LOCAL se procesa con PaddleOCR.
 
 El modelo OCR:
 - Se registra como Singleton.
@@ -261,19 +265,19 @@ Clasificacion por diccionarios:
 - El primer tipo que alcanza su MinimumMatches queda asignado.
 - Los tipos restantes no se evaluan.
 - Sin coincidencia suficiente, el tipo es NO CLASIFICADO.
-- BOLETA DE TRANSACCIONES va a 5_OCR_EXTERNO.
-- Los demas tipos van a 6_COPY_AZURE_FILES_STORAGE.
+- BOLETA DE TRANSACCIONES va a 6_OCR_EXTERNO.
+- Los demas tipos van a 7_COMPRESS.
 - ValidationSettings:Phrases permanece como fallback legacy si DocumentTypes
   no existe o esta vacio.
 
 Destino si cumple:
-C:\Scans\5_OCR_EXTERNO
+C:\Scans\6_OCR_EXTERNO
 
 Destino si no cumple:
-C:\Scans\6_COPY_AZURE_FILES_STORAGE
+C:\Scans\7_COMPRESS
 
-Estos destinos son carpetas locales. No representan todavia una conexion
-real con Azure ni otro OCR externo.
+Estos destinos son carpetas locales del pipeline. La etapa 4 ya verifico la
+copia previa en Azure Files antes de ejecutar el OCR local.
 
 El archivo solo se mueve despues de completar exitosamente:
 - OCR.
@@ -342,7 +346,7 @@ Configuracion Azure Files:
 - CompressDirectory: C:\Scans\7_COMPRESS.
 
 Azure Files no requiere una tabla de control en MySQL. La carpeta
-6_COPY_AZURE_FILES_STORAGE funciona como cola: si la copia falla, el archivo
+4_COPY_AZURE_FILES_STORAGE funciona como cola: si la copia falla, el archivo
 permanece allí y se reintenta en el siguiente ciclo; si la copia e integridad
 son exitosas, todo PDF continúa a 7_COMPRESS.
 
@@ -381,7 +385,7 @@ Configuracion Azure Blob Storage:
 ======================================================================
 
 Si OCR o MySQL falla:
-- El archivo permanece en 4_OCR_LOCAL.
+- El archivo permanece en 5_OCR_LOCAL.
 - Se registra el error en ocr_retry_control.
 - Se incrementa attempt_count.
 - Se guarda last_error.
@@ -527,7 +531,7 @@ Prueba 1: Archivo nuevo
 
 Prueba 2: PDF de una pagina
 - Confirmar copia exacta en 3_LOCAL_BACKUP.
-- Confirmar movimiento sin cambios a 4_OCR_LOCAL.
+- Confirmar movimiento sin cambios a 5_OCR_LOCAL.
 
 Prueba 3: PDF multipagina
 - Confirmar un archivo por pagina.
@@ -535,14 +539,14 @@ Prueba 3: PDF multipagina
 - Confirmar eliminacion del original multipagina.
 
 Prueba 4: OCR
-- Copiar archivo a 4_OCR_LOCAL.
+- Copiar archivo a 5_OCR_LOCAL.
 - Confirmar carga unica del modelo.
 - Confirmar fila en ocr_results.
 - Confirmar fila/estado en ocr_retry_control.
 
 Prueba 5: Clasificacion
-- Con 4 o mas coincidencias, confirmar 5_OCR_EXTERNO.
-- Con menos de 4, confirmar 6_COPY_AZURE_FILES_STORAGE.
+- Con 4 o mas coincidencias, confirmar 6_OCR_EXTERNO.
+- Con menos de 4, confirmar 7_COMPRESS.
 
 Prueba 6: MySQL desconectado
 - Detener o bloquear temporalmente MySQL.
@@ -573,8 +577,8 @@ Prueba 8: Servicio
 - Ctrl+C durante un OCR o PDF puede esperar a que termine una operacion
   sincrona no cancelable.
 - No ejecutar dos instancias porque pueden intentar procesar el mismo archivo.
-- 5_OCR_EXTERNO no es un servicio externo real.
-- 6_COPY_AZURE_FILES_STORAGE no es Azure real.
+- 6_OCR_EXTERNO no es un servicio externo real.
+- 4_COPY_AZURE_FILES_STORAGE es la cola local previa a la copia real en Azure Files.
 - No existe etapa 8 ni retencion automatica de archivos.
 - Los scripts de muestras y check_dict pueden tener rutas de desarrollo;
   no usarlos para produccion sin revisarlos.

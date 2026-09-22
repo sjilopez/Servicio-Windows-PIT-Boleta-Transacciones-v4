@@ -22,9 +22,9 @@ public class Worker(
     private readonly string _inputDirectory = configuration["OcrSettings:InputDirectory"] ?? @"C:\Scans\1_IN";
     private readonly string _validateDirectory = configuration["PipelineSettings:ValidateDirectory"] ?? @"C:\Scans\2_VALIDATE";
     private readonly string _localBackupDirectory = configuration["PipelineSettings:LocalBackupDirectory"] ?? @"C:\Scans\3_LOCAL_BACKUP";
-    private readonly string _ocrLocalDirectory = configuration["PipelineSettings:OcrLocalDirectory"] ?? @"C:\Scans\4_OCR_LOCAL";
-    private readonly string _externalOcrDirectory = configuration["PipelineSettings:OcrExternalDirectory"] ?? @"C:\Scans\5_OCR_EXTERNO";
-    private readonly string _azureFilesDirectory = configuration["PipelineSettings:AzureFilesDirectory"] ?? @"C:\Scans\6_COPY_AZURE_FILES_STORAGE";
+    private readonly string _azureFilesDirectory = configuration["PipelineSettings:AzureFilesDirectory"] ?? @"C:\Scans\4_COPY_AZURE_FILES_STORAGE";
+    private readonly string _ocrLocalDirectory = configuration["PipelineSettings:OcrLocalDirectory"] ?? @"C:\Scans\5_OCR_LOCAL";
+    private readonly string _externalOcrDirectory = configuration["PipelineSettings:OcrExternalDirectory"] ?? @"C:\Scans\6_OCR_EXTERNO";
     private readonly string _compressDirectory = configuration["AzureFiles:CompressDirectory"] ?? @"C:\Scans\7_COMPRESS";
     private readonly string _blobStorageDirectory = configuration["PdfCompression:OutputDirectory"] ?? @"C:\Scans\8_COPY_AZURE_BLOB_STORAGE";
     private readonly bool _azureBlobStorageEnabled = bool.TryParse(configuration["AzureBlobStorage:Enabled"], out bool azureBlobStorageEnabled) && azureBlobStorageEnabled;
@@ -123,6 +123,16 @@ public class Worker(
                     await ProcessValidationFileAsync(file, stoppingToken);
                 }
 
+                var azureFiles = Directory.EnumerateFiles(_azureFilesDirectory)
+                    .Where(file => SupportedExtensions.Contains(Path.GetExtension(file)))
+                    .ToArray();
+                foreach (var file in azureFiles)
+                {
+                    if (stoppingToken.IsCancellationRequested) break;
+
+                    await ProcessAzureFilesFileAsync(file, stoppingToken);
+                }
+
                 var ocrFiles = Directory.EnumerateFiles(_ocrLocalDirectory)
                     .Where(file => SupportedExtensions.Contains(Path.GetExtension(file)))
                     .ToArray();
@@ -142,15 +152,6 @@ public class Worker(
                     if (stoppingToken.IsCancellationRequested) break;
 
                     await ProcessExternalOcrFileAsync(file, stoppingToken);
-                }
-
-                var azureFiles = Directory.EnumerateFiles(_azureFilesDirectory, "*.pdf")
-                    .ToArray();
-                foreach (var file in azureFiles)
-                {
-                    if (stoppingToken.IsCancellationRequested) break;
-
-                    await ProcessAzureFilesFileAsync(file, stoppingToken);
                 }
 
                 var compressionFiles = Directory.EnumerateFiles(_compressDirectory, "*.pdf")
@@ -185,7 +186,7 @@ public class Worker(
     private async Task ProcessValidationFileAsync(string filePath, CancellationToken cancellationToken)
     {
         string fileName = Path.GetFileName(filePath);
-        logger.LogInformation("Etapa 2: procesando {FileName} desde 2_VALIDATE...", fileName);
+    logger.LogInformation("Etapa 2: procesando {FileName} desde 2_VALIDATE...", fileName);
 
         try
         {
@@ -203,9 +204,9 @@ public class Worker(
 
             if (!string.Equals(Path.GetExtension(filePath), ".pdf", StringComparison.OrdinalIgnoreCase))
             {
-                string imageDestination = Path.Combine(_ocrLocalDirectory, fileName);
+                string imageDestination = Path.Combine(_azureFilesDirectory, fileName);
                 File.Move(filePath, imageDestination, overwrite: false);
-                await WritePipelineLogAsync(imageDestination, "MOVED", "Archivo de imagen respaldado y movido a 4_OCR_LOCAL.", null, new
+                await WritePipelineLogAsync(imageDestination, "MOVED", "Archivo de imagen respaldado y movido a 4_COPY_AZURE_FILES_STORAGE.", null, new
                 {
                     StepNumber = 2,
                     PageCount = 1,
@@ -219,9 +220,9 @@ public class Worker(
             logger.LogInformation("Etapa 2: {FileName} contiene {PageCount} página(s).", fileName, pageCount);
             if (pageCount == 1)
             {
-                string destination = Path.Combine(_ocrLocalDirectory, fileName);
+                string destination = Path.Combine(_azureFilesDirectory, fileName);
                 File.Move(filePath, destination, overwrite: false);
-                await WritePipelineLogAsync(destination, "MOVED", "PDF de una página respaldado y movido a 4_OCR_LOCAL.", null, new
+                await WritePipelineLogAsync(destination, "MOVED", "PDF de una página respaldado y movido a 4_COPY_AZURE_FILES_STORAGE.", null, new
                 {
                     StepNumber = 2,
                     PageCount = pageCount,
@@ -235,17 +236,17 @@ public class Worker(
             for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string pagePath = Path.Combine(_ocrLocalDirectory, $"{nameWithoutExtension}_{pageIndex + 1}.pdf");
+                string pagePath = Path.Combine(_azureFilesDirectory, $"{nameWithoutExtension}_{pageIndex + 1}.pdf");
                 SplitPdfPage(filePath, pageIndex, pagePath);
             }
 
             File.Delete(filePath);
-            await WritePipelineLogAsync(backupPath, "SPLIT", "PDF multipágina respaldado, dividido y enviado a 4_OCR_LOCAL.", null, new
+            await WritePipelineLogAsync(backupPath, "SPLIT", "PDF multipágina respaldado, dividido y enviado a 4_COPY_AZURE_FILES_STORAGE.", null, new
             {
                 StepNumber = 2,
                 PageCount = pageCount,
                 BackupPath = backupPath,
-                DestinationDirectory = _ocrLocalDirectory
+                DestinationDirectory = _azureFilesDirectory
             }, 2, cancellationToken);
         }
         catch (Exception ex)
@@ -279,7 +280,7 @@ public class Worker(
         string fileName = Path.GetFileName(filePath);
         if (!File.Exists(filePath))
         {
-            logger.LogInformation("Etapa 3: {FileName} ya no está en 4_OCR_LOCAL; probablemente fue procesado por otra ejecución.", fileName);
+            logger.LogInformation("Etapa 5: {FileName} ya no está en 5_OCR_LOCAL; probablemente fue procesado por otra ejecución.", fileName);
             return;
         }
 
@@ -293,18 +294,18 @@ public class Worker(
                 if (completedAsTransactionReceipt.HasValue)
                 {
                     string completedDirectory = completedAsTransactionReceipt.Value
-                        ? configuration["PipelineSettings:OcrExternalDirectory"] ?? @"C:\Scans\5_OCR_EXTERNO"
-                        : configuration["PipelineSettings:AzureFilesDirectory"] ?? @"C:\Scans\6_COPY_AZURE_FILES_STORAGE";
+                        ? configuration["PipelineSettings:OcrExternalDirectory"] ?? @"C:\Scans\6_OCR_EXTERNO"
+                        : configuration["AzureFiles:CompressDirectory"] ?? @"C:\Scans\7_COMPRESS";
                     Directory.CreateDirectory(completedDirectory);
                     string completedDestination = MoveClassifiedFile(filePath, completedDirectory, fileName, fileHash);
-                    logger.LogInformation("Etapa 3: {FileName} ya estaba COMPLETED; se movió según su clasificación a {Destination}.", fileName, completedDestination);
+                    logger.LogInformation("Etapa 5: {FileName} ya estaba COMPLETED; se movió según su clasificación a {Destination}.", fileName, completedDestination);
                 }
 
                 return;
             }
 
             int attemptNumber = await RegisterOcrAttemptAsync(fileHash, fileName, filePath, cancellationToken);
-            logger.LogInformation("Etapa 3: OCR de {FileName}, intento {AttemptNumber}.", fileName, attemptNumber);
+            logger.LogInformation("Etapa 5: OCR de {FileName}, intento {AttemptNumber}.", fileName, attemptNumber);
 
             if (!_ocrReady)
             {
@@ -317,10 +318,10 @@ public class Worker(
             DocumentTypeClassification classification = ClassifyDocument(result.FullText);
             bool isTransactionReceipt = string.Equals(classification.DocumentType, "BOLETA DE TRANSACCIONES", StringComparison.OrdinalIgnoreCase);
             string classificationDirectory = isTransactionReceipt
-                ? configuration["PipelineSettings:OcrExternalDirectory"] ?? @"C:\Scans\5_OCR_EXTERNO"
-                : configuration["PipelineSettings:AzureFilesDirectory"] ?? @"C:\Scans\6_COPY_AZURE_FILES_STORAGE";
+                ? configuration["PipelineSettings:OcrExternalDirectory"] ?? @"C:\Scans\6_OCR_EXTERNO"
+                : configuration["AzureFiles:CompressDirectory"] ?? @"C:\Scans\7_COMPRESS";
             logger.LogInformation(
-                "Etapa 3: tipo {DocumentType}, coincidencias {MatchCount}/{MinimumMatches}. Es boleta de transacciones: {IsTransactionReceipt}. Destino: {DestinationDirectory}",
+                "Etapa 5: tipo {DocumentType}, coincidencias {MatchCount}/{MinimumMatches}. Es boleta de transacciones: {IsTransactionReceipt}. Destino: {DestinationDirectory}",
                 classification.DocumentType,
                 classification.MatchCount,
                 classification.MinimumMatches,
@@ -354,7 +355,7 @@ public class Worker(
 
             await WritePipelineLogAsync(destination, "OCR_CLASSIFIED", "OCR completado, JSON guardado y archivo clasificado.", null, new
             {
-                StepNumber = 3,
+                StepNumber = 5,
                 AttemptNumber = attemptNumber,
                 DocumentType = classification.DocumentType,
                 MatchCount = classification.MatchCount,
@@ -362,17 +363,17 @@ public class Worker(
                 IsTransactionReceipt = isTransactionReceipt,
                 Destination = destination,
                 ResultId = resultId
-            }, 3, cancellationToken);
+            }, 5, cancellationToken);
         }
         catch (FileNotFoundException)
         {
-            logger.LogInformation("Etapa 3: {FileName} ya fue movido o eliminado por otra ejecución.", fileName);
+            logger.LogInformation("Etapa 5: {FileName} ya fue movido o eliminado por otra ejecución.", fileName);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Etapa 3: error OCR/MySQL para {FileName}.", fileName);
+            logger.LogError(ex, "Etapa 5: error OCR/MySQL para {FileName}.", fileName);
             await FailOcrAttemptAsync(fileHash, fileName, filePath, ex, cancellationToken);
-            await WritePipelineLogAsync(filePath, "OCR_ERROR", "OCR o persistencia del resultado falló; el archivo permanece en 4_OCR_LOCAL.", ex, new { StepNumber = 3 }, 3, cancellationToken);
+            await WritePipelineLogAsync(filePath, "OCR_ERROR", "OCR o persistencia del resultado falló; el archivo permanece en 5_OCR_LOCAL.", ex, new { StepNumber = 5 }, 5, cancellationToken);
         }
     }
 
@@ -413,7 +414,7 @@ public class Worker(
 
         if (!_externalOcrEnabled)
         {
-            logger.LogInformation("OCR externo desactivado. {FileName} permanece en 5_OCR_EXTERNO y no se genera ningún costo.", fileName);
+            logger.LogInformation("OCR externo desactivado. {FileName} permanece en 6_OCR_EXTERNO y no se genera ningún costo.", fileName);
             return;
         }
 
@@ -427,14 +428,14 @@ public class Worker(
         ExternalOcrDecision decision = await GetExternalOcrDecisionAsync(fileHash, cancellationToken);
         if (decision.Success)
         {
-            string destination = MoveClassifiedFile(filePath, _azureFilesDirectory, fileName, fileHash);
+            string destination = MoveClassifiedFile(filePath, _compressDirectory, fileName, fileHash);
             await WritePipelineLogAsync(destination, "EXTERNAL_OCR_SKIPPED", "Documento ya procesado previamente. OCR omitido para evitar costo duplicado.", null, new
             {
-                StepNumber = 4,
+                StepNumber = 6,
                 OcrType = "EXTERNO",
                 FileHash = fileHash,
                 Destination = destination
-            }, 4, cancellationToken);
+            }, 6, cancellationToken);
             logger.LogInformation("OCR externo omitido para {FileName}: ya existe SUCCESS. Movido a {Destination}.", fileName, destination);
             return;
         }
@@ -465,10 +466,10 @@ public class Worker(
                 return;
             }
 
-            string destination = MoveClassifiedFile(filePath, _azureFilesDirectory, fileName, fileHash);
-            await WritePipelineLogAsync(destination, "EXTERNAL_OCR_SUCCESS", "OCR externo completado; PDF movido a almacenamiento Azure local.", null, new
+            string destination = MoveClassifiedFile(filePath, _compressDirectory, fileName, fileHash);
+            await WritePipelineLogAsync(destination, "EXTERNAL_OCR_SUCCESS", "OCR externo completado; PDF enviado a 7_COMPRESS.", null, new
             {
-                StepNumber = 4,
+                StepNumber = 6,
                 OcrType = "EXTERNO",
                 AttemptId = attemptId,
                 AttemptNumber = attemptNumber,
@@ -479,7 +480,7 @@ public class Worker(
                 TotalCost = response.TotalCost,
                 DatabaseError = response.DatabaseError,
                 Destination = destination
-            }, 4, cancellationToken);
+            }, 6, cancellationToken);
             logger.LogInformation("OCR externo SUCCESS para {FileName}. Destino: {Destination}. Costo: {TotalCost}.", fileName, destination, response.TotalCost);
         }
         catch (ExternalOcrException ex)
@@ -492,14 +493,14 @@ public class Worker(
 
             DateTime nextAttempt = GetGuatemalaDateTime().AddMinutes(_externalOcrRetryMinutes);
             await UpdateExternalOcrAttemptAsync(attemptId, ex.Status, ex.ToString(), nextAttempt, cancellationToken);
-            await WritePipelineLogAsync(filePath, ex.Status, "Falló el OCR externo; el PDF permanece en 5_OCR_EXTERNO.", ex, new
+            await WritePipelineLogAsync(filePath, ex.Status, "Falló el OCR externo; el PDF permanece en 6_OCR_EXTERNO.", ex, new
             {
-                StepNumber = 4,
+                StepNumber = 6,
                 OcrType = "EXTERNO",
                 AttemptId = attemptId,
                 AttemptNumber = attemptNumber,
                 NextAttemptAt = nextAttempt
-            }, 4, cancellationToken);
+            }, 6, cancellationToken);
             logger.LogError(ex, "OCR externo falló para {FileName}. Reintento: {NextAttemptAt}.", fileName, nextAttempt);
         }
         catch (Exception ex)
@@ -507,7 +508,7 @@ public class Worker(
             stopwatch.Stop();
             DateTime nextAttempt = GetGuatemalaDateTime().AddMinutes(_externalOcrRetryMinutes);
             await UpdateExternalOcrAttemptAsync(attemptId, "ERROR_PROCESAMIENTO", ex.ToString(), nextAttempt, cancellationToken);
-            await WritePipelineLogAsync(filePath, "ERROR_PROCESAMIENTO", "Error interno en OCR externo; el PDF permanece en 5_OCR_EXTERNO.", ex, new { StepNumber = 4, AttemptId = attemptId, AttemptNumber = attemptNumber, NextAttemptAt = nextAttempt }, 4, cancellationToken);
+            await WritePipelineLogAsync(filePath, "ERROR_PROCESAMIENTO", "Error interno en OCR externo; el PDF permanece en 6_OCR_EXTERNO.", ex, new { StepNumber = 6, AttemptId = attemptId, AttemptNumber = attemptNumber, NextAttemptAt = nextAttempt }, 6, cancellationToken);
             logger.LogError(ex, "Error procesando OCR externo para {FileName}.", fileName);
         }
     }
@@ -620,52 +621,37 @@ public class Worker(
 
         if (!_azureFilesEnabled)
         {
-            logger.LogInformation("Azure Files desactivado. {FileName} permanece en 6_COPY_AZURE_FILES_STORAGE.", fileName);
+            logger.LogInformation("Azure Files desactivado. {FileName} permanece en 4_COPY_AZURE_FILES_STORAGE.", fileName);
             return;
-        }
-
-        string fileHash = TryGetFileHash(filePath) ?? throw new InvalidOperationException($"No se pudo calcular el hash de {fileName}.");
-        bool? isTransactionReceipt = await GetReceiptClassificationAsync(fileHash, fileName, cancellationToken);
-        if (!isTransactionReceipt.HasValue)
-        {
-            logger.LogWarning("No existe clasificación OCR para {FileName}; se ejecutará OCR local de recuperación antes de copiar a Azure Files.", fileName);
-            isTransactionReceipt = await RecoverReceiptClassificationAsync(filePath, fileHash, fileName, cancellationToken);
-            if (!isTransactionReceipt.HasValue)
-            {
-                string classificationError = "No existe clasificación OCR para el archivo y no pudo recuperarse mediante OCR local.";
-                await WritePipelineLogAsync(filePath, "ERROR_PROCESAMIENTO", $"{classificationError} Se conserva en 6_COPY_AZURE_FILES_STORAGE.", null, new
-                {
-                    StepNumber = 5,
-                    FileHash = fileHash
-                }, 5, cancellationToken);
-                return;
-            }
         }
 
         string remotePath = BuildAzureRemotePath(fileName);
         try
         {
             AzureFileCopyResult result = await azureFilesService.CopyAsync(filePath, remotePath, cancellationToken);
-            await CompleteLocalAzureStepAsync(filePath, fileName, isTransactionReceipt.Value, cancellationToken);
-            await WritePipelineLogAsync(filePath, "AZURE_FILES_SUCCESS", "Archivo copiado a Azure Files y verificado por tamaño/MD5.", null, new
+            string fileHash = TryGetFileHash(filePath) ?? throw new InvalidOperationException($"No se pudo calcular el hash de {fileName}.");
+            string destination = Path.Combine(_ocrLocalDirectory, fileName);
+            string movedPath = MoveClassifiedFile(filePath, _ocrLocalDirectory, fileName, fileHash);
+            await WritePipelineLogAsync(movedPath, "AZURE_FILES_SUCCESS", "Archivo copiado a Azure Files, verificado por tamaño/MD5 y enviado a 5_OCR_LOCAL.", null, new
             {
-                StepNumber = 5,
+                StepNumber = 4,
                 RemotePath = result.RemotePath,
                 FileLength = result.Length,
                 LocalMd5 = result.LocalMd5,
                 RemoteMd5 = result.RemoteMd5,
-                AlreadyExisted = result.AlreadyExisted
-            }, 5, cancellationToken);
-            logger.LogInformation("Azure Files SUCCESS para {FileName}: {RemotePath}.", fileName, result.RemotePath);
+                AlreadyExisted = result.AlreadyExisted,
+                Destination = destination
+            }, 4, cancellationToken);
+            logger.LogInformation("Azure Files SUCCESS para {FileName}: {RemotePath}. Enviado a {Destination}.", fileName, result.RemotePath, movedPath);
         }
         catch (Exception ex)
         {
-            await WritePipelineLogAsync(filePath, "AZURE_FILES_ERROR", "Falló la copia o verificación en Azure Files; el archivo permanece local.", ex, new
+            await WritePipelineLogAsync(filePath, "AZURE_FILES_ERROR", "Falló la copia o verificación en Azure Files; el archivo permanece en 4_COPY_AZURE_FILES_STORAGE.", ex, new
             {
-                StepNumber = 5,
+                StepNumber = 4,
                 RemotePath = remotePath,
                 RetryOnNextCycle = true
-            }, 5, cancellationToken);
+            }, 4, cancellationToken);
             logger.LogError(ex, "Azure Files falló para {FileName}; se reintentará en el siguiente ciclo.", fileName);
         }
     }
@@ -750,13 +736,6 @@ public class Worker(
     }
 
 
-    private async Task CompleteLocalAzureStepAsync(string filePath, string fileName, bool isTransactionReceipt, CancellationToken cancellationToken)
-    {
-        Directory.CreateDirectory(_compressDirectory);
-        MoveClassifiedFile(filePath, _compressDirectory, fileName, TryGetFileHash(filePath) ?? string.Empty);
-        await Task.CompletedTask;
-    }
-
     private async Task ProcessCompressionFileAsync(string filePath, CancellationToken cancellationToken)
     {
         string fileName = Path.GetFileName(filePath);
@@ -804,22 +783,22 @@ public class Worker(
             File.Delete(filePath);
             await WritePipelineLogAsync(filePath, "AZURE_BLOB_SUCCESS", "PDF copiado y verificado en Azure Blob Storage; archivo local eliminado.", null, new
             {
-                StepNumber = 7,
+                StepNumber = 8,
                 BlobPath = result.BlobPath,
                 FileLength = result.Length,
                 LocalMd5 = result.LocalMd5,
                 RemoteMd5 = result.RemoteMd5,
                 AlreadyExisted = result.AlreadyExisted
-            }, 7, cancellationToken);
+            }, 8, cancellationToken);
             logger.LogInformation("Azure Blob Storage SUCCESS para {FileName}: {BlobPath}. Archivo local eliminado.", fileName, result.BlobPath);
         }
         catch (Exception ex)
         {
             await WritePipelineLogAsync(filePath, "AZURE_BLOB_ERROR", "Falló la copia a Azure Blob Storage; el archivo permanece local para reintento.", ex, new
             {
-                StepNumber = 7,
+                StepNumber = 8,
                 RetryMinutes = _azureBlobRetryMinutes
-            }, 7, cancellationToken);
+            }, 8, cancellationToken);
             logger.LogError(ex, "Azure Blob Storage falló para {FileName}; se reintentará en el próximo ciclo.", fileName);
         }
     }
