@@ -1,0 +1,13 @@
+bin/
+obj/
+dist/
+publish/
+publish_fd/
+*.user
+*.suo
+*.pdb
+*.pdf
+
+# Local configuration and secrets
+appsettings.Local.json
+.env

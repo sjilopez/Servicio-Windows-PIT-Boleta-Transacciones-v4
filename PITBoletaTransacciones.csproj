@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>4.0.0</Version>
+    <AssemblyVersion>4.0.0.0</AssemblyVersion>
+    <FileVersion>4.0.0.0</FileVersion>
+    <InformationalVersion>4.0.0</InformationalVersion>
+    <Description>Servicio de Digitalización de Boleta de Transacciones, hecha en C# y PaddleOCR, realizado por PIT de Coosajo, R.L.</Description>
+    <UserSecretsId>dotnet-PITBoletaTransacciones-559b1b82-8280-4253-8b94-62a3538bbb46</UserSecretsId>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;dist\**;publish\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
+    <PackageReference Include="Azure.Storage.Files.Shares" Version="12.23.0" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.27.0" />
+    <PackageReference Include="MySqlConnector" Version="2.4.0" />
+    <PackageReference Include="PDFtoImage" Version="5.4.0" />
+    <PackageReference Include="PDFsharp" Version="6.2.4" />
+    <PackageReference Include="SkiaSharp" Version="4.150.1" />
+    <PackageReference Include="Sdcb.SimdPaddleOCR" Version="1.4.1" />
+    <PackageReference Include="Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny" Version="1.0.0" />
+    <PackageReference Include="Sdcb.SimdPaddleOCR.Models.ChineseV6Small" Version="1.0.0" />
+    <PackageReference Include="Sdcb.SimdPaddleOCR.Models.ChineseV6Medium" Version="1.0.0" />
+  </ItemGroup>
+</Project>

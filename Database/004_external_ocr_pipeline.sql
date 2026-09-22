@@ -1,0 +1,48 @@
+CREATE TABLE IF NOT EXISTS external_ocr_requests (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    attempt_id CHAR(36) NOT NULL,
+    file_hash CHAR(64) NOT NULL,
+    file_name VARCHAR(500) NOT NULL,
+    file_path VARCHAR(2000) NOT NULL,
+    ocr_type VARCHAR(30) NOT NULL,
+    status VARCHAR(30) NOT NULL,
+    attempt_number INT NOT NULL,
+    host_name VARCHAR(255) NULL,
+    user_name VARCHAR(255) NULL,
+    created_at DATETIME(3) NOT NULL,
+    started_at DATETIME(3) NULL,
+    completed_at DATETIME(3) NULL,
+    next_attempt_at DATETIME(3) NULL,
+    last_error LONGTEXT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_external_ocr_attempt_id (attempt_id),
+    KEY ix_external_ocr_hash_status (file_hash, status),
+    KEY ix_external_ocr_retry (status, next_attempt_at),
+    KEY ix_external_ocr_file_hash_attempt (file_hash, attempt_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS external_ocr_responses (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    attempt_id CHAR(36) NOT NULL,
+    success BOOLEAN NOT NULL,
+    request_id VARCHAR(255) NULL,
+    total_pages INT NULL,
+    input_tokens INT NULL,
+    output_tokens INT NULL,
+    total_tokens INT NULL,
+    input_cost DECIMAL(18,8) NULL,
+    output_cost DECIMAL(18,8) NULL,
+    total_cost DECIMAL(18,8) NULL,
+    processing_time BIGINT NULL,
+    database_error TEXT NULL,
+    error_code VARCHAR(100) NULL,
+    error_message TEXT NULL,
+    created_at DATETIME(3) NULL,
+    completed_at DATETIME(3) NULL,
+    raw_json LONGTEXT NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_external_ocr_response_attempt (attempt_id),
+    KEY ix_external_ocr_response_request_id (request_id),
+    CONSTRAINT fk_external_ocr_response_attempt
+        FOREIGN KEY (attempt_id) REFERENCES external_ocr_requests(attempt_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -1,0 +1,608 @@
+INSTRUCCIONES CONSOLIDADAS
+RECONSTRUCCION DEL PIPELINE PIT - BOLETA DE TRANSACCIONES
+Version 4.0.0
+
+======================================================================
+1. OBJETIVO
+======================================================================
+
+Construir un Windows Worker Service en C# para recibir documentos escaneados,
+renombrarlos, respaldarlos, dividir PDFs, ejecutar OCR con PaddleOCR,
+guardar resultados y auditoria en MySQL, clasificar documentos y enviarlos
+a carpetas de salida.
+
+Nombre visible del servicio:
+PIT - Boleta de Transacciones
+
+Nombre interno recomendado para Windows:
+PIT_Boleta_Transacciones
+
+Descripcion:
+Servicio de Digitalizacion de Boleta de Transacciones, hecha en C# y
+PaddleOCR, realizado por PIT de Coosajo, R.L.
+
+Version:
+4.0.0
+
+Framework:
+.NET 10.0 para Windows, Worker Service, Windows x64.
+
+======================================================================
+2. PREREQUISITOS
+======================================================================
+
+- Windows 10/11 x64.
+- .NET SDK 10 para desarrollar.
+- Para la version publicada no es necesario instalar .NET, porque se publica
+  self-contained.
+- Acceso de red al servidor MySQL.
+- Permisos administrativos para instalar el servicio.
+- Permisos de lectura/escritura en C:\Scans.
+- CPU compatible con el rendimiento SIMD usado por la libreria OCR.
+
+======================================================================
+3. DEPENDENCIAS NUGET
+======================================================================
+
+Microsoft.Extensions.Hosting 10.0.12
+Microsoft.Extensions.Hosting.WindowsServices 10.0.12
+MySqlConnector 2.4.0
+PDFtoImage 5.4.0
+PDFsharp 6.2.4
+Sdcb.SimdPaddleOCR 1.4.1
+Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny 1.0.0
+Sdcb.SimdPaddleOCR.Models.ChineseV6Small 1.0.0
+Sdcb.SimdPaddleOCR.Models.ChineseV6Medium 1.0.0
+
+Los modelos disponibles son Tiny, Small y Medium. Son modelos ChineseV6.
+No se debe afirmar que existe un modelo espanol especifico en estos paquetes.
+Pueden reconocer texto latino, pero no son modelos espanol dedicados.
+
+======================================================================
+4. ESTRUCTURA DEL PIPELINE
+======================================================================
+
+C:\Scans\1_IN
+Entrada de todos los escaneres.
+
+C:\Scans\2_VALIDATE
+Archivos identificados y renombrados, pendientes de validacion/respaldo.
+
+C:\Scans\3_LOCAL_BACKUP
+Copia exacta del archivo recibido antes de dividirlo o moverlo.
+
+C:\Scans\4_OCR_LOCAL
+Archivos listos para OCR local.
+
+C:\Scans\5_OCR_EXTERNO
+Entrada de PDFs clasificados como boletas validas para el OCR externo.
+
+C:\Scans\6_COPY_AZURE_FILES_STORAGE
+Entrada local para copiar PDFs al recurso compartido Azure Files.
+
+C:\Scans\7_COMPRESS
+Destino temporal de boletas copiadas y verificadas en Azure Files.
+
+C:\Scans\8_COPY_AZURE_BLOB_STORAGE
+Destino local de PDFs comprimidos correctamente. Esta etapa todavía no
+representa una conexión real con Azure Blob Storage.
+
+C:\Scans\6_COPY_AZURE_FILES_STORAGE
+Destino local de documentos que no cumplen la validacion.
+No existe integracion real con Azure en esta etapa.
+
+C:\Scans\Logs
+Outbox local JSON para eventos que no pudieron insertarse en MySQL.
+
+No existe actualmente una etapa 8 ni una politica automatica de retencion de
+7 dias. No agregarlas sin definirlas formalmente.
+
+======================================================================
+5. CONFIGURACION appsettings.json
+======================================================================
+
+La configuracion principal debe contener estas secciones:
+
+"OcrSettings": {
+  "Model": "Tiny",
+  "InputDirectory": "C:\\Scans\\1_IN",
+  "OutputDirectory": ""
+}
+
+"PipelineSettings": {
+  "ValidateDirectory": "C:\\Scans\\2_VALIDATE",
+  "LocalBackupDirectory": "C:\\Scans\\3_LOCAL_BACKUP",
+  "OcrLocalDirectory": "C:\\Scans\\4_OCR_LOCAL",
+  "OcrExternalDirectory": "C:\\Scans\\5_OCR_EXTERNO",
+  "AzureFilesDirectory": "C:\\Scans\\6_COPY_AZURE_FILES_STORAGE",
+  "LogsDirectory": "C:\\Scans\\Logs",
+  "ScanIntervalSeconds": 10,
+  "FileStabilityChecks": 2,
+  "FileStabilityDelayMilliseconds": 1000,
+  "FileOpenTimeoutMilliseconds": 3000,
+  "MaxFileReadAttempts": 3,
+  "OcrRetryDelaySeconds": 30
+}
+
+"ValidationSettings": {
+  "MinimumMatches": 4,
+  "Phrases": [
+    "BOLETA DE TRANSACCIONES",
+    "BOLETA",
+    "TRANSACCIONES",
+    "NIT:551823-7",
+    "FORMULARIOS STANDARD",
+    "AUTORIZADO SEGUN RESOLUCION",
+    "Cooperativa de Ahorro y Credito Integral San Jose Obrero"
+  ]
+}
+
+"MySql": {
+  "Server": "10.60.59.203",
+  "Port": 3306,
+  "Database": "boleta_transacciones",
+  "User": "root",
+  "Password": "REEMPLAZAR_LOCALMENTE",
+  "ConnectTimeoutSeconds": 5,
+  "CommandTimeoutSeconds": 10,
+  "Enabled": true
+}
+
+No incluir contrasenas reales en esta documentacion. La contrasena debe
+configurarse localmente en el appsettings.json instalado.
+Nunca escribir la contrasena en logs, JSON ni mensajes de error.
+
+======================================================================
+6. ETAPA 1: 1_IN HACIA 2_VALIDATE
+======================================================================
+
+Extensiones aceptadas, sin distinguir mayusculas/minusculas:
+.pdf, .png, .jpg, .jpeg, .bmp, .webp
+
+El servicio revisa 1_IN al iniciar y cada ScanIntervalSeconds.
+
+Antes de procesar un archivo:
+- Esperar que termine de copiarse.
+- Verificar que el tamano y fecha de modificacion permanezcan estables.
+- Confirmar que puede abrirse sin bloqueo.
+- Usar timeout de apertura para no congelar el servicio.
+
+Renombrar usando la fecha de CREACION del archivo, no la hora de renombrado.
+La zona horaria debe ser Windows Central America Standard Time.
+
+Formato exacto:
+AGENCIA_USUARIO_YYYYMMDD_HHMMSSmmm.ext
+
+Importante: HHMMSSmmm va unido. No usar autocorrelativo.
+Las tres cifras finales son milisegundos reales de la hora de creacion.
+
+AGENCIA:
+- Si el nombre del equipo empieza con SJAGM, usar los primeros 5 caracteres.
+- En otro caso, usar los primeros 4 caracteres, por ejemplo SJ01.
+
+USUARIO:
+- Obtenerlo desde la sesion activa de Windows mediante WTS.
+- No usar la cuenta Local Service como nombre del usuario.
+- Si no existe sesion activa, usar UNKNOWN y registrar el evento.
+
+Ejemplo:
+SJ01_SJILOPEZ_20260919_184801123.pdf
+
+Mover el archivo renombrado a C:\Scans\2_VALIDATE.
+Registrar el evento como paso 1.
+
+======================================================================
+7. ETAPA 2: VALIDACION, BACKUP Y DIVISION PDF
+======================================================================
+
+Cada archivo en 2_VALIDATE se procesa automaticamente.
+
+1. Esperar estabilidad y desbloqueo.
+2. Crear una copia exacta en 3_LOCAL_BACKUP.
+3. Si es imagen, moverla a 4_OCR_LOCAL.
+4. Si es PDF, contar paginas.
+5. Si tiene una pagina, moverlo sin modificaciones a 4_OCR_LOCAL.
+6. Si tiene varias paginas, crear un PDF por pagina:
+
+Archivo original:
+SJ01_SJILOPEZ_20260919_184801123.pdf
+
+Archivos generados:
+SJ01_SJILOPEZ_20260919_184801123_1.pdf
+SJ01_SJILOPEZ_20260919_184801123_2.pdf
+SJ01_SJILOPEZ_20260919_184801123_3.pdf
+
+7. Eliminar el PDF multipagina original solo despues de crear correctamente
+todas sus paginas.
+8. Registrar el evento como paso 2.
+
+Usar PDFsharp para dividir conservando cada pagina como PDF.
+Usar PDFtoImage solamente para renderizar paginas destinadas al OCR.
+
+======================================================================
+8. ETAPA 3: OCR EN 4_OCR_LOCAL
+======================================================================
+
+Cada archivo que llegue a 4_OCR_LOCAL se procesa con PaddleOCR.
+
+El modelo OCR:
+- Se registra como Singleton.
+- Se carga una sola vez durante la vida del proceso.
+- Se reutiliza durante todo el dia para todos los documentos.
+- Solo vuelve a cargarse si el servicio completo se reinicia.
+- Si la carga inicial falla, el servicio permanece vivo y reintenta antes
+de procesar documentos.
+
+Resultado OCR:
+- Texto completo.
+- Lineas detectadas.
+- Puntuacion de reconocimiento.
+- Rotacion.
+- Cantidad de paginas.
+- Tiempo de procesamiento.
+- JSON completo del resultado.
+
+El JSON OCR se guarda en MySQL, en la columna ocr_json de ocr_results.
+
+======================================================================
+9. VALIDACION DE CONTENIDO Y CLASIFICACION
+======================================================================
+
+Normalizar el texto para buscar sin distinguir mayusculas ni acentos.
+Comparar las frases configuradas en ValidationSettings:Phrases.
+
+La regla actual es:
+- MinimumMatches = 4.
+- Con 4 o mas frases encontradas, es Boleta de Transacciones.
+- Con menos de 4, no es Boleta de Transacciones.
+
+Clasificacion por diccionarios:
+- DocumentTypes se evalua exactamente en el orden del JSON.
+- El primer tipo que alcanza su MinimumMatches queda asignado.
+- Los tipos restantes no se evaluan.
+- Sin coincidencia suficiente, el tipo es NO CLASIFICADO.
+- BOLETA DE TRANSACCIONES va a 5_OCR_EXTERNO.
+- Los demas tipos van a 6_COPY_AZURE_FILES_STORAGE.
+- ValidationSettings:Phrases permanece como fallback legacy si DocumentTypes
+  no existe o esta vacio.
+
+Destino si cumple:
+C:\Scans\5_OCR_EXTERNO
+
+Destino si no cumple:
+C:\Scans\6_COPY_AZURE_FILES_STORAGE
+
+Estos destinos son carpetas locales. No representan todavia una conexion
+real con Azure ni otro OCR externo.
+
+El archivo solo se mueve despues de completar exitosamente:
+- OCR.
+- Clasificacion.
+- INSERT del resultado OCR en MySQL.
+
+======================================================================
+10. TABLAS MYSQL
+======================================================================
+
+Crear la base:
+
+CREATE DATABASE IF NOT EXISTS boleta_transacciones
+CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+Ejecutar, en orden:
+
+1. Database/001_create_pipeline_logs.sql
+2. Database/002_local_time_only.sql
+3. Database/003_ocr_pipeline.sql
+4. Database/004_external_ocr_pipeline.sql
+5. Database/005_azure_file_copies.sql (obsoleta; no requerida por Azure Files)
+
+TABLA pipeline_logs:
+Auditoria de todos los pasos. Incluye event_id, step_number, status, mensaje,
+excepcion, stack trace, host, usuario, IP, servicio, version, archivo, hash,
+attempt_number, occurred_at, metadata_json y created_at.
+
+La fecha debe ser solamente Fecha/Hora local de Guatemala en occurred_at.
+No agregar UTC si el requerimiento sigue siendo solo hora local.
+
+TABLA ocr_results:
+Guarda result_id, file_hash, file_name, file_path, page_count, line_count,
+full_text, ocr_json, matched_phrases_json, match_count, document_type,
+is_transaction_receipt, ocr_elapsed_ms y processed_at.
+
+TABLA ocr_retry_control:
+Guarda file_hash, file_name, file_path, first_attempt_at, last_attempt_at,
+next_attempt_at, attempt_count, status, last_error y updated_at.
+
+Estados recomendados:
+PROCESSING, FAILED, COMPLETED.
+
+TABLAS external_ocr_requests y external_ocr_responses:
+Registran cada intento del OCR externo y su respuesta JSON completa. La
+deduplicacion se realiza por SHA-256 y cualquier estado SUCCESS impide una
+nueva llamada que pueda generar costo.
+
+Configuracion OCR externo:
+- Enabled: false durante pruebas; true solamente cuando se autorice el costo.
+- Endpoint: http://172.179.9.62:8001/api/v1/ocr
+- ApiKeyHeader: x-api-key
+- FileFieldName: file
+- TimeoutSeconds: 120
+- RetryMinutes: 2
+
+La API key debe configurarse mediante variable de entorno
+OCRExterno__ApiKey o User Secrets; no debe guardarse en el repositorio.
+Estados externos: PENDIENTE, PROCESANDO, SUCCESS, ERROR_API,
+ERROR_CONEXION, ERROR_TIMEOUT y ERROR_PROCESAMIENTO.
+
+Configuracion Azure Files:
+- Enabled: false durante pruebas; true cuando el recurso este configurado.
+- ConnectionString: connection string del Storage Account.
+- ShareName: nombre del recurso compartido.
+- CompressDirectory: C:\Scans\7_COMPRESS.
+
+Azure Files no requiere una tabla de control en MySQL. La carpeta
+6_COPY_AZURE_FILES_STORAGE funciona como cola: si la copia falla, el archivo
+permanece allí y se reintenta en el siguiente ciclo; si la copia e integridad
+son exitosas, todo PDF continúa a 7_COMPRESS.
+
+Rutas remotas Azure Files:
+- SJAGM_{USUARIO}_...pdf -> AGENTES/{USUARIO}/{archivo completo}.pdf
+- SJ01_{USUARIO}_...pdf -> AGENCIAS/SJ01/{USUARIO}/{archivo completo}.pdf
+
+La copia verifica tamaño y MD5. Si el archivo remoto ya existe y coincide,
+se considera exitosa sin sobrescribirlo. Todos los PDFs pasan a 7_COMPRESS
+después de una copia Azure Files exitosa, sin importar su tipo documental.
+
+Compresión PDF:
+- Todo PDF en 7_COMPRESS se rasteriza a 150 DPI.
+- Cada página se codifica como JPEG con calidad 60%.
+- Si el PDF comprimido es menor, reemplaza el contenido de salida.
+- Si el resultado es igual o mayor, se conserva el PDF original.
+- El resultado final se mueve a 8_COPY_AZURE_BLOB_STORAGE.
+- Si la compresión falla, el original permanece en 7_COMPRESS.
+
+Azure Blob Storage:
+- Todo PDF en 8_COPY_AZURE_BLOB_STORAGE se sube al contenedor configurado.
+- El nombre debe contener YYYYMMDD_HHMMSSmmm, por ejemplo:
+  SJ01_SJILOPEZ_20260921_181300123.pdf
+- La ruta del blob será: 2026/09/21/18/SJ01_SJILOPEZ_20260921_181300123.pdf
+- Se verifica la longitud y el MD5 del blob antes de eliminar el archivo local.
+- Si la verificación o la subida falla, el archivo permanece en 8 y se reintenta.
+
+Configuracion Azure Blob Storage:
+- Enabled: false durante pruebas; true cuando se autorice la subida.
+- ConnectionString: connection string del Storage Account.
+- ContainerName: nombre del contenedor.
+- RetryMinutes: intervalo documentado para reintentos.
+
+======================================================================
+11. ERRORES, REINTENTOS Y OUTBOX JSON
+======================================================================
+
+Si OCR o MySQL falla:
+- El archivo permanece en 4_OCR_LOCAL.
+- Se registra el error en ocr_retry_control.
+- Se incrementa attempt_count.
+- Se guarda last_error.
+- Se calcula next_attempt_at.
+- Se vuelve a intentar en un ciclo posterior.
+
+Si falla un INSERT de pipeline_logs:
+- Crear un JSON en C:\Scans\Logs.
+- Guardar toda la informacion posible.
+- No guardar la contrasena.
+- Reintentar sincronizar el JSON cuando MySQL vuelva.
+- Eliminar el JSON solamente despues de confirmar el INSERT.
+- Usar event_id unico y ON DUPLICATE KEY para evitar duplicados.
+
+Los eventos deben incluir:
+- EventId.
+- StepNumber.
+- Status.
+- Message.
+- ExceptionType.
+- ExceptionMessage.
+- StackTrace.
+- HostName.
+- UserName.
+- IpAddress.
+- ServiceName.
+- ServiceVersion.
+- ProcessId.
+- FileName.
+- FilePath.
+- FileSize.
+- FileHash SHA-256.
+- AttemptNumber.
+- OccurredAt.
+- Details.
+
+======================================================================
+12. SERVICIO WINDOWS
+======================================================================
+
+Program.cs debe:
+- Usar Host.CreateApplicationBuilder.
+- Registrar AddWindowsService.
+- Usar DisplayName: PIT - Boleta de Transacciones.
+- Registrar PaddleOcrService como Singleton.
+- Registrar Worker como HostedService.
+- Usar mutex local Local\\PIT_Boleta_Transacciones.
+
+Nunca ejecutar simultaneamente:
+- dotnet run.
+- PITBoletaTransacciones.exe.
+- Una instancia instalada del servicio.
+
+Si otra instancia ya esta activa, la segunda debe informar y terminar.
+
+Instalacion recomendada:
+- Ejecutar instalar_servicio.bat como Administrador.
+- Servicio interno: PIT_Boleta_Transacciones.
+- Ejecutable: C:\Program Files\PIT_Boletas_Transacciones\PITBoletaTransacciones.exe
+- Inicio automatico.
+- DisplayName: PIT - Boleta de Transacciones.
+- Configurar sc failure para reiniciar 3 veces, cada 60 segundos.
+
+Comandos de verificacion:
+
+sc query PIT_Boleta_Transacciones
+sc qfailure PIT_Boleta_Transacciones
+
+Desinstalar con desinstalar_servicio.bat como Administrador.
+
+======================================================================
+13. ESTRUCTURA DEL CODIGO
+======================================================================
+
+Program.cs
+Punto de entrada, Windows Service y mutex.
+
+Worker.cs
+Ciclo de escaneo, etapas 1-4, MySQL, logs, reintentos y movimientos.
+
+Services/IOcrService.cs
+Contrato del servicio OCR.
+
+Services/PaddleOcrService.cs
+Carga singleton del modelo, lectura PDF/imagen y OCR.
+
+Services/ExternalOcrService.cs
+Cliente HTTP multipart/form-data, parseo de respuesta y timeout del OCR externo.
+
+Services/WindowsSessionUser.cs
+Obtencion del usuario de la sesion activa mediante WTS.
+
+PITBoletaTransacciones.csproj
+Framework, version y dependencias NuGet.
+
+appsettings.json
+Rutas, modelo, MySQL, frases y tiempos.
+
+======================================================================
+14. COMPILAR Y PUBLICAR
+======================================================================
+
+Desde la raiz del proyecto:
+
+ dotnet clean
+ dotnet restore
+ dotnet build -c Release
+
+Publicacion autocontenida para otra computadora Windows x64:
+
+ dotnet publish PITBoletaTransacciones.csproj -c Release -r win-x64 --self-contained true -o C:\Scans\pit-publish-win-x64
+
+Si la unidad de red Z: es lenta, publicar primero en C:\Scans y luego copiar.
+
+Preparar instalador:
+
+ .\build_installer.ps1
+ .\create_zip.ps1
+
+Resultado esperado:
+
+dist\PIT_Boletas_Transacciones_Instalador.zip
+
+El ZIP debe incluir:
+- app\PITBoletaTransacciones.exe
+- appsettings.json
+- runtime y DLLs publicados.
+- instalar_servicio.bat
+- desinstalar_servicio.bat
+- LEEME.txt
+
+La publicacion self-contained no requiere instalar .NET en la computadora
+destino.
+
+======================================================================
+15. PRUEBAS OBLIGATORIAS
+======================================================================
+
+Prueba 1: Archivo nuevo
+- Copiar un PDF a 1_IN.
+- Confirmar nombre en 2_VALIDATE.
+- Confirmar usuario, agencia, fecha de creacion y HHMMSSmmm.
+
+Prueba 2: PDF de una pagina
+- Confirmar copia exacta en 3_LOCAL_BACKUP.
+- Confirmar movimiento sin cambios a 4_OCR_LOCAL.
+
+Prueba 3: PDF multipagina
+- Confirmar un archivo por pagina.
+- Confirmar sufijos _1, _2, _3.
+- Confirmar eliminacion del original multipagina.
+
+Prueba 4: OCR
+- Copiar archivo a 4_OCR_LOCAL.
+- Confirmar carga unica del modelo.
+- Confirmar fila en ocr_results.
+- Confirmar fila/estado en ocr_retry_control.
+
+Prueba 5: Clasificacion
+- Con 4 o mas coincidencias, confirmar 5_OCR_EXTERNO.
+- Con menos de 4, confirmar 6_COPY_AZURE_FILES_STORAGE.
+
+Prueba 6: MySQL desconectado
+- Detener o bloquear temporalmente MySQL.
+- Generar un evento.
+- Confirmar JSON en C:\Scans\Logs.
+- Restaurar MySQL.
+- Confirmar INSERT y eliminacion del JSON pendiente.
+
+Prueba 7: Archivo bloqueado
+- Mantener un archivo abierto.
+- Confirmar que no se mueve y queda registrado.
+- Liberarlo y confirmar reintento posterior.
+
+Prueba 8: Servicio
+- Instalar como Administrador.
+- Revisar services.msc.
+- Ejecutar sc query y sc qfailure.
+- Detener y reiniciar.
+- Confirmar que el modelo se carga nuevamente solo tras reinicio.
+
+======================================================================
+16. PROBLEMAS CONOCIDOS Y LIMITES
+======================================================================
+
+- La carga inicial del modelo ocurre una sola vez por proceso.
+- El modelo no se carga por cada PDF.
+- PDFtoImage y OCR pueden tardar durante el procesamiento de un documento.
+- Ctrl+C durante un OCR o PDF puede esperar a que termine una operacion
+  sincrona no cancelable.
+- No ejecutar dos instancias porque pueden intentar procesar el mismo archivo.
+- 5_OCR_EXTERNO no es un servicio externo real.
+- 6_COPY_AZURE_FILES_STORAGE no es Azure real.
+- No existe etapa 8 ni retencion automatica de archivos.
+- Los scripts de muestras y check_dict pueden tener rutas de desarrollo;
+  no usarlos para produccion sin revisarlos.
+- Revisar que el appsettings.json del paquete de instalacion tenga las rutas
+  y credenciales correctas antes de instalar.
+- Nunca publicar ni compartir la contrasena MySQL en documentacion.
+
+======================================================================
+17. CHECKLIST FINAL
+======================================================================
+
+[ ] Proyecto .NET 10 Worker creado.
+[ ] Dependencias NuGet instaladas.
+[ ] Program.cs configurado como Windows Service.
+[ ] Mutex global implementado.
+[ ] Worker con etapas 1, 2 y 3.
+[ ] Usuario activo WTS implementado.
+[ ] Zona horaria Guatemala configurada.
+[ ] Modelo OCR Singleton configurado.
+[ ] Carpetas C:\Scans creadas.
+[ ] Base MySQL creada.
+[ ] Tres tablas MySQL creadas.
+[ ] Frases y MinimumMatches configurados.
+[ ] Logs MySQL y fallback JSON probados.
+[ ] Reintentos OCR probados.
+[ ] Publicacion Release win-x64 generada.
+[ ] ZIP del instalador generado.
+[ ] Instalacion probada como Administrador.
+[ ] No hay dos instancias ejecutandose.
+
+FIN DEL DOCUMENTO
